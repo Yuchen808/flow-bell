@@ -108,7 +108,22 @@ def test_bells_after_board():
     x = decode(ROOT / "sounds/open_board.mp3")
     e = np.array([np.sqrt((x[i:i + 441] ** 2).mean()) for i in range(0, len(x) - 441, 441)])
     t = np.arange(len(e)) * .02
-    assert e[t < 14.9].max() < .7 * e[(t > 15) & (t < 16)].max()
+    assert e[t < 18.8].max() < .7 * e[(t > 18.9) & (t < 19.9)].max()
+
+
+def test_bells_start_without_a_click():
+    """The bell recording begins mid-wave; every strike popped until each one got a fade-in."""
+    x = decode(ROOT / "sounds/open_board.mp3")
+    sr = 22050
+    for t in (23.89, 28.89):
+        assert np.abs(np.diff(x[int((t - .05) * sr):int((t + .15) * sr)])).max() < .1
+
+
+@pytest.mark.parametrize("f", [f for f in SOUNDS if "close" in f])
+def test_ending_starts_from_silence(f):
+    """The ending began at full level on the first sample and crackled."""
+    x = decode(ROOT / f)
+    assert np.abs(x[:int(.005 * 22050)]).max() < .02 * np.abs(x).max()
 
 
 def test_every_sound_is_credited():
