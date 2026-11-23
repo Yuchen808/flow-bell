@@ -462,6 +462,12 @@ class FlowBar:
             self.kick()
         elif self.flow and self._anim is None:
             self.draw()
+        if not self.flow and self._anim is None and time.time() - getattr(self, "_kept", 0) > 5:   # Idle: repaint and re-assert topmost every 5 s. Windows can drop a layered window after sleep or a display change
+            self._kept = time.time()
+            self.draw()
+        if self.host.topmost and time.time() - getattr(self, "_raised", 0) > 5:
+            self._raised = time.time()
+            _u32.SetWindowPos(self.hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)   # HWND_TOPMOST
         fast = self.flow and self.flow.get("speed", 1) > 1
         self.root.after(33 if fast else 1000, self.tick)   # 试跑时每帧都画，才看得出渐暗是怎么走的
 
