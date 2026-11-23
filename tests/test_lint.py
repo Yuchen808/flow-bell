@@ -1,0 +1,130 @@
+"""Every correction becomes a check that fails by itself. Each test names the mistake it prevents."""
+import pathlib
+import re
+import subprocess
+import sys
+import time
+import types
+
+import numpy as np
+import pytest
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+import flow_bell as fb  # noqa: E402
+
+FILES = [f for f in subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, text=True, encoding="utf-8").stdout.split("\0") if f]
+
+
+def bar(minutes=90, left=1.0):
+    k = 2
+    host = types.SimpleNamespace(w=fb.WIDTH * k, pad=fb.PAD * k, scale=k, line_h=k, state={}, topmost=True, expand=1.0, corner_r=8 * k, root=None)
+    b = fb.App.__new__(fb.App)
+    b.np, b.host, b.root, b.scale, b.hover, b.pos, b.speed, b.flow = np, host, None, k, None, None, 1, None
+    b.margin, b.lead = 8 * k, 8 * k + host.line_h
+    b.w, b.h = host.w + 2 * b.margin, (b.PH + 36) * k + b.lead
+    from PIL import ImageFont
+    b.font = ImageFont.load_default()
+    b._layout()
+    n = len(b.groups)
+    b.v = {q: np.zeros(n, np.float32) for q in ("hover", "dim", "press", "flash", "run")}
+    b.level = np.ones(n, np.float32)
+    b._build()
+    i = b._index(minutes)
+    now = time.time()
+    b.flow = {"min": minutes, "start": now - minutes * 60 * (1 - left), "end": now + minutes * 60 * left}
+    b.v["dim"][:] = 1
+    b.v["dim"][i] = 0
+    b.v["run"][i] = 1
+    return b, i
+
+
+def shot(b):
+    a = np.asarray(b.render()).astype(float)
+    return a[: int(b.cy / b.SS + b.PH * b.scale / 2)]
+
+
+def test_no_jump_after_start():
+    """The pill froze, then jumped, at 0.1 % of the session."""
+    f = [shot(bar(left=x)[0]) for x in (.9992, .9988)]
+    assert np.abs(f[1] - f[0]).sum() < 400
+
+
+def test_starts_dimming_at_once():
+    """The lit edge ran outside the pill for the first quarter, so nothing seemed to happen."""
+    assert np.abs(shot(bar(left=.95)[0]) - shot(bar(left=1.0)[0])).sum() > 2000
+
+
+def test_both_tails_stay_lit():
+    """The right neck went dark the moment the timer started, the left one only at the end."""
+    tail = []
+    for left in (.99, .5, .05):
+        b, i = bar(minutes=60, left=left)
+        a = shot(b)
+        _, x0, x1 = b.groups[i]
+        d = b.NECK * b.scale * b.SS / 4
+        tail.append([a[:, int(round(x / b.SS)) - 1:int(round(x / b.SS)) + 2, :3].sum() for x in (x0 - d, x1 + d)])
+    tail = np.array(tail)
+    assert (tail.max(0) / tail.min(0) < 1.15).all(), tail
+
+
+def test_no_white_flash():
+    """Starting must brighten the pill, not bleach it."""
+    b, i = bar(left=1.0)
+    b.v["flash"][i] = 1
+    _, x0, x1 = b.groups[i]
+    a = shot(b)[:, int(x0 / b.SS) + 10:int(x1 / b.SS) - 10]
+    assert (a[..., :3].min(-1) > 235).mean() < .02
+
+
+def test_dots_stay_dark():
+    b, i = bar(left=.5)
+    _, x0, x1 = b.groups[i]
+    assert shot(b)[int(b.cy / b.SS), int((x0 + x1) / 2 / b.SS), :3].max() < 40
+
+
+def decode(path):
+    raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(path), "-ac", "1", "-ar", "22050", "-f", "f32le", "-"], capture_output=True, check=True).stdout
+    return np.frombuffer(raw, np.float32).astype(float)
+
+
+SOUNDS = [f for f in FILES if f.endswith(".mp3")]
+
+
+@pytest.mark.parametrize("f", SOUNDS)
+def test_sound_is_clean(f):
+    """No dead time before the sound, no clipping, no cut-off ending, no hour-long cue."""
+    x = decode(ROOT / f)
+    sr = 22050
+    assert len(x) / sr < 60
+    assert np.abs(x).max() < 1.0
+    assert np.argmax(np.abs(x) > .01 * np.abs(x).max()) / sr < .7
+    assert np.abs(x[-int(.1 * sr):]).max() < .05
+
+
+def test_bells_after_board():
+    """The bells ring only after the board has stopped."""
+    x = decode(ROOT / "sounds/open_board.mp3")
+    e = np.array([np.sqrt((x[i:i + 441] ** 2).mean()) for i in range(0, len(x) - 441, 441)])
+    t = np.arange(len(e)) * .02
+    assert e[t < 14.9].max() < .7 * e[(t > 15) & (t < 16)].max()
+
+
+def test_every_sound_is_credited():
+    credits = (ROOT / "CREDITS.md").read_text(encoding="utf-8")
+    assert [f for f in SOUNDS if f"`{f}`" not in credits] == []
+
+
+def test_no_superseded_files():
+    """Old versions carry _SS and stay out of the repo."""
+    assert [f for f in FILES if re.search(r"_SS\b|_SS\.", f)] == []
+
+
+def test_nothing_private():
+    bs = chr(92) * 2
+    bad = re.compile("[A-Z]:" + bs + "Users" + bs + "|[A-Z]:" + bs + r"\[0|ghp_|api[_-]?key *=|@gmail|todoist", re.I)
+    hits = []
+    for f in FILES:
+        if f.endswith((".py", ".md", ".yml", ".txt")) and not f.startswith("tests/") and bad.search((ROOT / f).read_text(encoding="utf-8")):
+            hits.append(f)
+    assert hits == []
