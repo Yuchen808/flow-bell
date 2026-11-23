@@ -84,7 +84,8 @@ def test_dots_stay_dark():
 
 
 def decode(path):
-    raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(path), "-ac", "1", "-ar", "22050", "-f", "f32le", "-"], capture_output=True, check=True).stdout
+    import imageio_ffmpeg
+    raw = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-loglevel", "error", "-i", str(path), "-ac", "1", "-ar", "22050", "-f", "f32le", "-"], capture_output=True, check=True).stdout
     return np.frombuffer(raw, np.float32).astype(float)
 
 
