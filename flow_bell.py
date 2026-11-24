@@ -342,10 +342,69 @@ class FlowBar:
                                       ("×60  " if f.get("speed", 1) > 1 else "") + f"{left // 60:02d}:{left % 60:02d}", font=self.font, fill=255, anchor="mm")
             mk = np.asarray(mask).astype(np.float32)[..., None] / 255
             arr = np.asarray(img).astype(np.float32)
-            arr[..., :3] = 168 * mk + arr[..., :3] * (1 - mk)
+            arr[..., :3] = self._invert(mask) * mk + arr[..., :3] * (1 - mk)
             arr[..., 3:4] = np.maximum(arr[..., 3:4], 255 * mk)
             img = Image.fromarray(arr.astype(np.uint8), "RGBA")
         return img
+
+    # ----- Countdown colour: the inverse of whatever is behind the digits -----
+    INV_MIN = 70                                                     # Mid grey inverts to mid grey: below this contrast, push to black or white
+
+    def _read_screen(self, x, y, w, h):
+        """A small screen rectangle as RGB floats, or None. Kept in memory only."""
+        np = self.np
+        screen = _u32.GetDC(None)
+        mem = _g32.CreateCompatibleDC(screen)
+        bmi = BITMAPINFOHEADER(ctypes.sizeof(BITMAPINFOHEADER), w, -h, 1, 32, 0, 0, 0, 0, 0, 0)
+        bits = ctypes.c_void_p()
+        bmp = _g32.CreateDIBSection(mem, ctypes.byref(bmi), 0, ctypes.byref(bits), None, 0)
+        old = _g32.SelectObject(mem, bmp)
+        ok = _g32.BitBlt(ctypes.c_void_p(mem), 0, 0, w, h, ctypes.c_void_p(screen), x, y, 0x00CC0020)
+        out = None
+        if ok:
+            out = np.frombuffer(ctypes.string_at(bits, w * h * 4), np.uint8).reshape(h, w, 4)[..., 2::-1].astype(np.float32)
+        _g32.SelectObject(mem, old)
+        _g32.DeleteObject(bmp)
+        _g32.DeleteDC(mem)
+        _u32.ReleaseDC(None, screen)
+        return out
+
+    def _invert(self, mask):
+        """Inverted colours for the digits. The screen also shows the digits drawn last time, so the last two
+        masks are cut out and filled from the background around them. Reads at most every 0.2 s."""
+        np = self.np
+        from PIL import ImageFilter
+        now, last, box = time.time(), getattr(self, "_inv", None), mask.getbbox()
+        if box is None or self.pos is None:
+            return last if last is not None else 168.0
+        if last is None or now - getattr(self, "_inv_at", 0) >= 0.2:
+            self._inv_at = now
+            m = int(6 * self.scale)
+            x0, y0 = max(0, box[0] - m), max(0, box[1] - int(2 * self.scale))
+            x1, y1 = min(self.w, box[2] + m), min(self.h, box[3] + m)
+            try:
+                bg = self._read_screen(self.pos[0] + x0, self.pos[1] + y0, x1 - x0, y1 - y0)
+            except Exception:
+                bg = None
+            if bg is not None:
+                ok = np.ones(bg.shape[:2], np.float32)
+                for old in getattr(self, "_inv_masks", []):
+                    ok[np.asarray(old.filter(ImageFilter.MaxFilter(3)).crop((x0, y0, x1, y1))) > 4] = 0
+                ker = np.ones(2 * max(2, int(3 * self.scale)) + 1, np.float32)
+                ker /= ker.size
+                blur1 = lambda a, ax: np.apply_along_axis(lambda r: np.convolve(np.pad(r, ker.size // 2, mode="edge"), ker, "valid"), ax, a)
+                blur = lambda a: blur1(blur1(a, 0), 1)
+                wsum = blur(ok)
+                far = bg[ok > 0].mean(0) if ok.any() else bg.mean((0, 1))
+                fill = np.stack([(blur(bg[..., k] * ok) + far[k] * 0.02) / (wsum + 0.02) for k in range(3)], -1)
+                inv, lum = 255 - fill, np.array([0.299, 0.587, 0.114], np.float32)
+                weak = np.clip((self.INV_MIN - np.abs(inv @ lum - fill @ lum)) / self.INV_MIN, 0, 1)[..., None]
+                inv = inv * (1 - weak) + (255.0 if far @ lum < 128 else 0.0) * weak
+                last = np.full((self.h, self.w, 3), 168, np.float32)
+                last[y0:y1, x0:x1] = inv
+                self._inv = last
+        self._inv_masks = (getattr(self, "_inv_masks", []) + [mask])[-2:]
+        return last if last is not None else 168.0
 
     def draw(self):
         if self.pos is None:
@@ -462,8 +521,14 @@ class FlowBar:
             self.kick()
         elif self.flow and self._anim is None:
             self.draw()
+        if not self.flow and self._anim is None and time.time() - getattr(self, "_kept", 0) > 5:   # Idle: repaint and re-assert topmost every 5 s. Windows can drop a layered window after sleep or a display change
+            self._kept = time.time()
+            self.draw()
+        if self.host.topmost and time.time() - getattr(self, "_raised", 0) > 5:
+            self._raised = time.time()
+            _u32.SetWindowPos(self.hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)   # HWND_TOPMOST
         fast = self.flow and self.flow.get("speed", 1) > 1
-        self.root.after(33 if fast else 1000, self.tick)   # 试跑时每帧都画，才看得出渐暗是怎么走的
+        self.root.after(33 if fast else 250 if self.flow else 1000, self.tick)   # 试跑时每帧都画，才看得出渐暗是怎么走的
 
     def toggle_speed(self):
         self.speed = 1 if self.speed > 1 else 60
