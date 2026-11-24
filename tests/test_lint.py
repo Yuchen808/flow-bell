@@ -144,3 +144,28 @@ def test_nothing_private():
         if f.endswith((".py", ".md", ".yml", ".txt")) and not f.startswith("tests/") and bad.search((ROOT / f).read_text(encoding="utf-8")):
             hits.append(f)
     assert hits == []
+
+
+@pytest.mark.parametrize("bg, dark_text", [(255, True), (0, False), (128, True), (110, False)])
+def test_countdown_readable_and_stable_on_any_background(bg, dark_text):
+    """Grey digits vanished on mid backgrounds. The bar also reads back its own digits, which must not make it flicker."""
+    from PIL import Image, ImageDraw, ImageFont
+    b, _ = bar()
+    b.pos = (0, 0)
+    screen = np.full((b.h, b.w, 3), bg, np.float32)
+    b._read_screen = lambda x, y, w, h: screen[y:y + h, x:x + w].copy()
+    seen = []
+    for text in ("26:36", "26:35", "26:34"):
+        b._inv_at = 0
+        mask = Image.new("L", (b.w, b.h), 0)
+        ImageDraw.Draw(mask).text((b.w // 2, b.h - 30), text, font=ImageFont.load_default(), fill=255)
+        inv, a = b._invert(mask), np.asarray(mask)[..., None] / 255
+        screen = np.full((b.h, b.w, 3), bg, np.float32) * (1 - a) + inv * a
+        seen.append(inv[np.asarray(mask) > 128].mean())
+    assert all((x < bg) == dark_text and abs(x - bg) > 60 for x in seen), seen
+    assert max(seen) - min(seen) < 3, seen
+
+
+def test_screen_reader_does_not_shadow_the_drag_handler():
+    """App already had a _grab (right-drag), which would have replaced a screen reader of the same name."""
+    assert not set(vars(fb.App)) & {"_read_screen", "_invert"}
